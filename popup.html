@@ -1,0 +1,101 @@
+<div class="syq-popup">
+    <div class="syq-compose-header">
+        <button id="syq-close-composer" class="syq-icon-button" type="button" aria-label="닫기">&times;</button>
+    </div>
+
+    <div class="syq-mobile-sheet">
+        <div class="syq-preview-card">
+            <canvas id="syq-preview-canvas" width="1080" height="1080"></canvas>
+        </div>
+
+        <div class="syq-section">
+            <div class="syq-row">
+                <span class="syq-label">배경</span>
+                <div class="syq-ratio-group">
+                    <button type="button" class="syq-option-chip" data-group="ratio" data-value="1:1">1:1</button>
+                    <button type="button" class="syq-option-chip" data-group="ratio" data-value="3:4">3:4</button>
+                    <button type="button" class="syq-option-chip" data-group="ratio" data-value="2:3">2:3</button>
+                </div>
+            </div>
+            <div class="syq-background-strip">
+                <button type="button" id="syq-custom-background-button" class="syq-bg-thumb syq-bg-custom" data-group="theme" data-value="custom" aria-label="직접 선택"></button>
+                <button type="button" class="syq-bg-thumb syq-bg-night" data-group="theme" data-value="night" aria-label="밤하늘"></button>
+                <button type="button" class="syq-bg-thumb syq-bg-black" data-group="theme" data-value="black" aria-label="검은 배경"></button>
+                <button type="button" class="syq-bg-thumb syq-bg-white" data-group="theme" data-value="white" aria-label="흰 배경"></button>
+                <button type="button" class="syq-bg-thumb syq-bg-blue-mist" data-group="theme" data-value="blue-mist" aria-label="푸른 안개"></button>
+                <button type="button" class="syq-bg-thumb syq-bg-aqua-glow" data-group="theme" data-value="aqua-glow" aria-label="아쿠아"></button>
+                <button type="button" class="syq-bg-thumb syq-bg-soft-pink" data-group="theme" data-value="soft-pink" aria-label="핑크"></button>
+                <button type="button" class="syq-bg-thumb syq-bg-violet-room" data-group="theme" data-value="violet-room" aria-label="바이올렛"></button>
+            </div>
+            <input id="syq-custom-background-input" type="file" accept="image/*" hidden />
+        </div>
+
+        <div class="syq-section">
+            <span class="syq-label">글꼴</span>
+            <div class="syq-pill-group">
+                <button type="button" class="syq-pill" data-group="font" data-value="pretendard">Pretendard</button>
+                <button type="button" class="syq-pill" data-group="font" data-value="wonbatang">한둥근바탕</button>
+                <button type="button" class="syq-pill" data-group="font" data-value="nanum">나눔명조</button>
+                <button type="button" class="syq-pill" data-group="font" data-value="nexon">넥슨 고딕</button>
+            </div>
+        </div>
+
+        <div class="syq-section syq-inline-controls">
+            <div class="syq-control-cluster">
+                <span class="syq-label">글자 크기</span>
+                <div class="syq-pill-group">
+                    <button type="button" class="syq-pill" data-group="size" data-value="small">작게</button>
+                    <button type="button" class="syq-pill" data-group="size" data-value="normal">보통</button>
+                    <button type="button" class="syq-pill" data-group="size" data-value="large">크게</button>
+                </div>
+            </div>
+
+            <div class="syq-control-cluster">
+                <span class="syq-label">정렬</span>
+                <div class="syq-pill-group">
+                    <button type="button" class="syq-pill syq-align-button" data-group="align" data-value="left" aria-label="왼쪽 정렬"><i class="fa-solid fa-align-left"></i></button>
+                    <button type="button" class="syq-pill syq-align-button" data-group="align" data-value="center" aria-label="가운데 정렬"><i class="fa-solid fa-align-center"></i></button>
+                    <button type="button" class="syq-pill syq-align-button" data-group="align" data-value="right" aria-label="오른쪽 정렬"><i class="fa-solid fa-align-right"></i></button>
+                </div>
+            </div>
+        </div>
+
+        <div class="syq-section syq-inline-controls">
+            <div class="syq-control-cluster">
+                <span class="syq-label">배경 보정</span>
+                <div class="syq-toggle-row">
+                    <button id="syq-darken-toggle" type="button" class="syq-pill syq-toggle-button">
+                        <span>어둡게</span>
+                    </button>
+                    <button id="syq-lighten-toggle" type="button" class="syq-pill syq-toggle-button">
+                        <span>밝게</span>
+                    </button>
+                </div>
+                <input id="syq-darken" class="syq-overlay-checkbox" type="checkbox" hidden />
+                <input id="syq-lighten" class="syq-overlay-checkbox" type="checkbox" hidden />
+            </div>
+
+            <div class="syq-control-cluster">
+                <span class="syq-label">글자색</span>
+                <div class="syq-color-group">
+                    <button type="button" class="syq-color-chip syq-color-white" data-value="white" aria-label="흰색"><span>T</span></button>
+                    <button type="button" class="syq-color-chip syq-color-black" data-value="black" aria-label="검은색"><span>T</span></button>
+                </div>
+            </div>
+        </div>
+
+        <div class="syq-section">
+            <label class="syq-label" for="syq-quote-text">문장</label>
+            <textarea id="syq-quote-text" class="syq-field syq-textarea" rows="5" placeholder="공유할 문장을 입력해주세요."></textarea>
+            <label class="syq-label" for="syq-quote-title">제목</label>
+            <input id="syq-quote-title" class="syq-field" type="text" maxlength="80" />
+            <label class="syq-label" for="syq-quote-author">작가</label>
+            <input id="syq-quote-author" class="syq-field" type="text" maxlength="80" />
+        </div>
+    </div>
+
+    <div class="syq-footer">
+        <button id="syq-save-quote" class="syq-save-button" type="button">저장하기</button>
+        <button id="syq-download-image" class="syq-share-button" type="button">공유하기</button>
+    </div>
+</div>

@@ -1,0 +1,22 @@
+<div class="syq-popup syq-library-popup">
+    <div class="syq-library-header">
+        <div class="syq-library-title-area">
+            <div class="syq-library-title-wrap">
+                <div class="syq-library-eyebrow">Share Your Quotes</div>
+                <h2>저장한 문장</h2>
+            </div>
+            <button id="syq-close-library" class="syq-icon-button" type="button" aria-label="close">&times;</button>
+        </div>
+        <div class="syq-library-filter-row">
+            <select id="syq-library-chat-filter" class="syq-library-filter"></select>
+            <button id="syq-export-quotes" class="syq-library-tool-button" type="button" aria-label="내보내기"><i class="fa-solid fa-file-export"></i></button>
+            <button id="syq-import-quotes" class="syq-library-tool-button" type="button" aria-label="불러오기"><i class="fa-solid fa-file-import"></i></button>
+            <input id="syq-import-quotes-input" type="file" accept="application/json,.json" hidden />
+        </div>
+    </div>
+
+    <div id="syq-library-list" class="syq-library-list">
+        <div id="syq-library-items"></div>
+        <div id="syq-library-pagination" class="syq-library-pagination"></div>
+    </div>
+</div>
