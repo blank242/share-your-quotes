@@ -10,12 +10,16 @@ import {
     DEFAULT_CHAT_TITLE,
     DEFAULT_PERSONA_NAME,
     ELLIPSIS,
+    EMPTY_OPTION_HTML,
     EXTENSION_TEMPLATE_PATH,
     FILE_READER_EMPTY_JSON,
     FILE_UPLOAD_ENDPOINT,
     FONT_FAMILIES,
     FONT_LOAD_SPECS,
+    LIBRARY_TABS,
     MODULE_NAME,
+    MSG_ID_BACKFILLED_FLAG,
+    MSG_ID_FIELD,
     QUOTE_PLACEHOLDER_TEXT,
     SAVED_QUOTES_FILE_NAME,
     SOURCE_SEPARATOR,
@@ -33,6 +37,9 @@ const SELECTION_MENU_OFFSET_Y = 12;
 const TOUCH_MOUSE_SUPPRESSION_MS = 700;
 const WAND_BUTTON_RETRY_DELAYS = Object.freeze([500, 1500]);
 const CLIPBOARD_READ_DELAY_MS = 50;
+const CHAT_EVENT_DELAY_MS = 250;
+const MESSAGE_SCROLL_TIMEOUT_MS = 5000;
+const MESSAGE_SCROLL_POLL_MS = 120;
 const SELECTION_UPDATE_DELAYS = Object.freeze({
     default: [60],
     mouseup: [30, 90],
@@ -96,6 +103,7 @@ const defaultSettings = Object.freeze({
     defaultDarken: true,
     defaultLighten: false,
     savedQuotes: [],
+    savedBookmarks: [],
     savedQuotesJsonPath: '',
 });
 
@@ -110,11 +118,18 @@ const popupState = {
     initialQuote: null,
     sourceChatId: CUSTOM_CHAT_ID,
     sourceChatName: CUSTOM_CHAT_LABEL,
+    sourceChatFileName: '',
+    sourceGroupId: '',
+    sourceMsgId: '',
+    sourceCharacterId: '',
+    sourceCharacterName: '',
+    sourceCharacterAvatar: '',
 };
 
 const selectionState = {
     menu: null,
     selectedText: '',
+    messageIndex: -1,
     updateTimers: [],
     lastTouchAt: 0,
 };
@@ -129,12 +144,21 @@ const libraryState = {
     filterChatId: '',
     fallbackFilterChatId: '',
     currentPage: 1,
+    activeTab: LIBRARY_TABS.quotes,
 };
 
 const editorState = {
     modal: null,
     fields: null,
     quoteId: '',
+};
+
+const bookmarkState = {
+    modal: null,
+    fields: null,
+    messageIndex: -1,
+    msgId: '',
+    sourceChat: null,
 };
 
 const backgroundAssetCache = new Map();
@@ -223,6 +247,7 @@ async function syncSavedQuotesJsonFile() {
     try {
         const payload = {
             savedQuotes: getSavedQuotes(),
+            savedBookmarks: getSavedBookmarks(),
         };
         const response = await fetch(FILE_UPLOAD_ENDPOINT, {
             method: 'POST',
@@ -252,6 +277,95 @@ function createQuoteId() {
         || `syq-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+function createUuid() {
+    return globalThis.crypto?.randomUUID?.()
+        || `syq-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function getMessageExtra(message) {
+    if (!message || typeof message !== 'object') {
+        return null;
+    }
+
+    if (!message.extra || typeof message.extra !== 'object') {
+        message.extra = {};
+    }
+
+    return message.extra;
+}
+
+function ensureMessageMsgId(message) {
+    const extra = getMessageExtra(message);
+    if (!extra) {
+        return { changed: false, msgId: '' };
+    }
+
+    if (!extra[MSG_ID_FIELD]) {
+        extra[MSG_ID_FIELD] = createUuid();
+        return { changed: true, msgId: String(extra[MSG_ID_FIELD]) };
+    }
+
+    return { changed: false, msgId: String(extra[MSG_ID_FIELD]) };
+}
+
+async function saveChatIfPossible() {
+    try {
+        await getContextSafe()?.saveChat?.();
+        return true;
+    } catch (error) {
+        console.warn('Share Your Quotes: failed to save chat after msg_id update', error);
+        return false;
+    }
+}
+
+async function backfillChatMessageIds() {
+    const context = getContextSafe();
+    if (!Array.isArray(context?.chat) || !context.chatMetadata) {
+        return;
+    }
+
+    if (context.chatMetadata[MSG_ID_BACKFILLED_FLAG] === true) {
+        injectMessageBookmarkButtons();
+        return;
+    }
+
+    let changed = false;
+    for (const message of context.chat) {
+        changed = ensureMessageMsgId(message).changed || changed;
+    }
+
+    if (changed && !await saveChatIfPossible()) {
+        injectMessageBookmarkButtons();
+        return;
+    }
+
+    context.chatMetadata[MSG_ID_BACKFILLED_FLAG] = true;
+    try {
+        if (context.saveMetadata) {
+            await context.saveMetadata();
+        } else {
+            context.saveMetadataDebounced?.();
+        }
+    } catch (error) {
+        console.warn('Share Your Quotes: failed to save msg_id metadata flag', error);
+    }
+
+    injectMessageBookmarkButtons();
+}
+
+async function ensureMessageIndexMsgId(messageIndex) {
+    const context = getContextSafe();
+    const index = Number(messageIndex);
+    const message = Array.isArray(context?.chat) ? context.chat[index] : null;
+    const result = ensureMessageMsgId(message);
+
+    if (result.changed) {
+        await saveChatIfPossible();
+    }
+
+    return result.msgId;
+}
+
 function getSavedQuotes() {
     const settings = getSettings();
     if (!Array.isArray(settings.savedQuotes)) {
@@ -268,6 +382,22 @@ function persistSavedQuotes(quotes) {
     void syncSavedQuotesJsonFile();
 }
 
+function getSavedBookmarks() {
+    const settings = getSettings();
+    if (!Array.isArray(settings.savedBookmarks)) {
+        settings.savedBookmarks = [];
+    }
+
+    return settings.savedBookmarks;
+}
+
+function persistSavedBookmarks(bookmarks) {
+    const settings = getSettings();
+    settings.savedBookmarks = bookmarks;
+    saveSettings();
+    void syncSavedQuotesJsonFile();
+}
+
 function normalizeQuoteRecord(input, fallback = {}) {
     return {
         id: String(input?.id || fallback.id || createQuoteId()),
@@ -276,6 +406,28 @@ function normalizeQuoteRecord(input, fallback = {}) {
         author: String(input?.author || fallback.author || '').trim(),
         chatId: String(input?.chatId || fallback.chatId || CUSTOM_CHAT_ID),
         chatName: String(input?.chatName || fallback.chatName || ''),
+        chatFileName: String(input?.chatFileName || fallback.chatFileName || ''),
+        groupId: String(input?.groupId || fallback.groupId || ''),
+        characterId: String(input?.characterId || fallback.characterId || ''),
+        characterName: String(input?.characterName || fallback.characterName || ''),
+        characterAvatar: String(input?.characterAvatar || fallback.characterAvatar || ''),
+        msgId: String(input?.msgId || fallback.msgId || ''),
+        savedAt: String(input?.savedAt || fallback.savedAt || new Date().toISOString()),
+    };
+}
+
+function normalizeBookmarkRecord(input, fallback = {}) {
+    return {
+        id: String(input?.id || fallback.id || createQuoteId()),
+        title: String(input?.title || fallback.title || '').trim(),
+        chatId: String(input?.chatId || fallback.chatId || CUSTOM_CHAT_ID),
+        chatName: String(input?.chatName || fallback.chatName || ''),
+        chatFileName: String(input?.chatFileName || fallback.chatFileName || ''),
+        groupId: String(input?.groupId || fallback.groupId || ''),
+        characterId: String(input?.characterId || fallback.characterId || ''),
+        characterName: String(input?.characterName || fallback.characterName || ''),
+        characterAvatar: String(input?.characterAvatar || fallback.characterAvatar || ''),
+        msgId: String(input?.msgId || fallback.msgId || ''),
         savedAt: String(input?.savedAt || fallback.savedAt || new Date().toISOString()),
     };
 }
@@ -300,9 +452,14 @@ function getCurrentChatInfo() {
     }
 
     return {
-        id: String(integrityId || fileName),
+        id: String(fileName || integrityId),
         name: chatName,
         fileName: fileName ? String(fileName) : '',
+        groupId: currentGroup?.id ? String(currentGroup.id) : '',
+        characterId: currentCharacter ? String(context?.characterId ?? '') : '',
+        characterName: currentCharacter?.name ? String(currentCharacter.name) : '',
+        characterAvatar: currentCharacter?.avatar ? String(currentCharacter.avatar) : '',
+        integrityId: integrityId ? String(integrityId) : '',
     };
 }
 
@@ -317,8 +474,28 @@ function saveQuoteRecord(input) {
     return quote;
 }
 
+function saveBookmarkRecord(input) {
+    const bookmark = normalizeBookmarkRecord(input);
+    if (!bookmark.title) {
+        toastr.warning('저장할 북마크 제목이 없어요.');
+        return null;
+    }
+
+    if (!bookmark.msgId) {
+        toastr.warning('메시지 위치를 찾을 수 없어요.');
+        return null;
+    }
+
+    persistSavedBookmarks([bookmark, ...getSavedBookmarks()]);
+    return bookmark;
+}
+
 function deleteQuoteRecord(id) {
     persistSavedQuotes(getSavedQuotes().filter(quote => quote.id !== id));
+}
+
+function deleteBookmarkRecord(id) {
+    persistSavedBookmarks(getSavedBookmarks().filter(bookmark => bookmark.id !== id));
 }
 
 function updateQuoteRecord(id, input) {
@@ -354,12 +531,16 @@ function getQuoteRecord(id) {
     return getSavedQuotes().find(quote => quote.id === id) || null;
 }
 
-function getQuoteChatId(quote) {
-    return String(quote?.chatId || CUSTOM_CHAT_ID);
+function getBookmarkRecord(id) {
+    return getSavedBookmarks().find(bookmark => bookmark.id === id) || null;
 }
 
-function getQuoteChatLabel(quote) {
-    const chatId = getQuoteChatId(quote);
+function getSavedRecordChatId(record) {
+    return String(record?.chatId || CUSTOM_CHAT_ID);
+}
+
+function getSavedRecordChatLabel(record) {
+    const chatId = getSavedRecordChatId(record);
     if (chatId === CUSTOM_CHAT_ID) {
         return CUSTOM_CHAT_LABEL;
     }
@@ -369,17 +550,25 @@ function getQuoteChatLabel(quote) {
         return currentChat.name;
     }
 
-    return String(quote?.chatName || chatId)
+    return String(record?.chatName || record?.chatFileName || chatId)
         .replace(/\.jsonl$/i, '')
         .replace(/^.*[\\/]/, '');
 }
 
-function getLibraryChatOptions(quotes) {
+function getQuoteChatId(quote) {
+    return getSavedRecordChatId(quote);
+}
+
+function getQuoteChatLabel(quote) {
+    return getSavedRecordChatLabel(quote);
+}
+
+function getLibraryChatOptions(records) {
     const options = new Map();
-    for (const quote of quotes) {
-        const chatId = getQuoteChatId(quote);
+    for (const record of records) {
+        const chatId = getSavedRecordChatId(record);
         if (!options.has(chatId)) {
-            options.set(chatId, getQuoteChatLabel(quote));
+            options.set(chatId, getSavedRecordChatLabel(record));
         }
     }
 
@@ -400,12 +589,12 @@ function getLibraryChatOptions(quotes) {
         });
 }
 
-function renderLibraryChatFilter(quotes) {
+function renderLibraryChatFilter(records) {
     if (!libraryState.filterSelect) {
         return;
     }
 
-    const options = getLibraryChatOptions(quotes);
+    const options = getLibraryChatOptions(records);
     if (libraryState.filterChatId && !options.some(option => option.value === libraryState.filterChatId)) {
         libraryState.filterChatId = options.some(option => option.value === libraryState.fallbackFilterChatId)
             ? libraryState.fallbackFilterChatId
@@ -413,7 +602,7 @@ function renderLibraryChatFilter(quotes) {
     }
 
     libraryState.filterSelect.html([
-        '<option value="">전체 보기</option>',
+        EMPTY_OPTION_HTML,
         ...options.map(option => `<option value="${escapeHtml(option.value)}">${escapeHtml(option.label)}</option>`),
     ].join(''));
     libraryState.filterSelect.val(libraryState.filterChatId);
@@ -446,11 +635,12 @@ function getExportPayload() {
         version: EXPORT_VERSION,
         exportedAt: new Date().toISOString(),
         savedQuotes: getSavedQuotes(),
+        savedBookmarks: getSavedBookmarks(),
     };
 }
 
 function downloadJsonFile(fileName, data) {
-    const blob = new Blob([JSON.stringify(data, null, JSON_INDENT)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify(data, null, JSON_INDENT)], { type: 'application/json;charset=utf-8' });
     const anchor = document.createElement('a');
     anchor.href = URL.createObjectURL(blob);
     anchor.download = fileName;
@@ -469,7 +659,7 @@ function readJsonFile(file) {
             }
         };
         reader.onerror = () => reject(reader.error);
-        reader.readAsText(file);
+        reader.readAsText(file, 'utf-8');
     });
 }
 
@@ -485,6 +675,16 @@ function getImportedQuotes(payload) {
         .filter(quote => quote.text);
 }
 
+function getImportedBookmarks(payload) {
+    const rawBookmarks = Array.isArray(payload?.savedBookmarks)
+        ? payload.savedBookmarks
+        : [];
+
+    return rawBookmarks
+        .map(bookmark => normalizeBookmarkRecord(bookmark))
+        .filter(bookmark => bookmark.title && bookmark.msgId);
+}
+
 function exportSavedQuotes() {
     downloadJsonFile(SAVED_QUOTES_FILE_NAME, getExportPayload());
 }
@@ -495,9 +695,11 @@ async function importSavedQuotes(file) {
     }
 
     try {
-        const importedQuotes = getImportedQuotes(await readJsonFile(file));
-        if (!importedQuotes.length) {
-            toastr.warning('불러올 문장이 없어요.');
+        const payload = await readJsonFile(file);
+        const importedQuotes = getImportedQuotes(payload);
+        const importedBookmarks = getImportedBookmarks(payload);
+        if (!importedQuotes.length && !importedBookmarks.length) {
+            toastr.warning('불러올 데이터가 없어요.');
             return;
         }
 
@@ -507,6 +709,13 @@ async function importSavedQuotes(file) {
         }
 
         persistSavedQuotes(Array.from(merged.values())
+            .sort((a, b) => new Date(b.savedAt).getTime() - new Date(a.savedAt).getTime()));
+        const mergedBookmarks = new Map(getSavedBookmarks().map(bookmark => [String(bookmark.id), bookmark]));
+        for (const bookmark of importedBookmarks) {
+            mergedBookmarks.set(String(bookmark.id), bookmark);
+        }
+
+        persistSavedBookmarks(Array.from(mergedBookmarks.values())
             .sort((a, b) => new Date(b.savedAt).getTime() - new Date(a.savedAt).getTime()));
         libraryState.currentPage = 1;
         renderLibraryList();
@@ -556,6 +765,12 @@ function getPopupInput() {
         lighten: popupState.fields.lighten.prop('checked'),
         chatId: popupState.sourceChatId || CUSTOM_CHAT_ID,
         chatName: popupState.sourceChatName || '',
+        chatFileName: popupState.sourceChatFileName || '',
+        groupId: popupState.sourceGroupId || '',
+        characterId: popupState.sourceCharacterId || '',
+        characterName: popupState.sourceCharacterName || '',
+        characterAvatar: popupState.sourceCharacterAvatar || '',
+        msgId: popupState.sourceMsgId || '',
         customBackgroundUrl: popupState.customBackgroundUrl,
         customBackgroundImage: popupState.customBackgroundImage,
     };
@@ -1059,9 +1274,21 @@ async function openComposer(text = '', quote = null, sourceChat = { id: CUSTOM_C
         author: String(quote.author || ''),
         chatId: String(quote.chatId || CUSTOM_CHAT_ID),
         chatName: String(quote.chatName || ''),
+        chatFileName: String(quote.chatFileName || ''),
+        groupId: String(quote.groupId || ''),
+        characterId: String(quote.characterId || ''),
+        characterName: String(quote.characterName || ''),
+        characterAvatar: String(quote.characterAvatar || ''),
+        msgId: String(quote.msgId || ''),
     } : null;
     popupState.sourceChatId = popupState.initialQuote?.chatId || sourceChat?.id || CUSTOM_CHAT_ID;
     popupState.sourceChatName = popupState.initialQuote?.chatName || sourceChat?.name || CUSTOM_CHAT_LABEL;
+    popupState.sourceChatFileName = popupState.initialQuote?.chatFileName || sourceChat?.fileName || '';
+    popupState.sourceGroupId = popupState.initialQuote?.groupId || sourceChat?.groupId || '';
+    popupState.sourceCharacterId = popupState.initialQuote?.characterId || sourceChat?.characterId || '';
+    popupState.sourceCharacterName = popupState.initialQuote?.characterName || sourceChat?.characterName || '';
+    popupState.sourceCharacterAvatar = popupState.initialQuote?.characterAvatar || sourceChat?.characterAvatar || '';
+    popupState.sourceMsgId = popupState.initialQuote?.msgId || sourceChat?.msgId || '';
     popupState.selectedText = popupState.initialQuote?.text || text || popupState.selectedText;
     const modal = createModalFromHtml(await renderTemplate(context, 'popup'));
     popupState.modal = modal;
@@ -1091,6 +1318,12 @@ function closeComposer() {
     popupState.initialQuote = null;
     popupState.sourceChatId = CUSTOM_CHAT_ID;
     popupState.sourceChatName = CUSTOM_CHAT_LABEL;
+    popupState.sourceChatFileName = '';
+    popupState.sourceGroupId = '';
+    popupState.sourceMsgId = '';
+    popupState.sourceCharacterId = '';
+    popupState.sourceCharacterName = '';
+    popupState.sourceCharacterAvatar = '';
     $(document).off('keydown.syqmodal');
 }
 
@@ -1167,36 +1400,282 @@ function closeEditor() {
     $(document).off('keydown.syqeditor');
 }
 
+function getMessageTextByIndex(messageIndex) {
+    const context = getContextSafe();
+    const message = Array.isArray(context?.chat) ? context.chat[Number(messageIndex)] : null;
+    return String(message?.mes || '').replace(/<[^>]*>/g, '').trim();
+}
+
+function getBookmarkInput() {
+    return {
+        title: bookmarkState.fields.title.val().toString().trim(),
+        chatId: bookmarkState.sourceChat?.id || CUSTOM_CHAT_ID,
+        chatName: bookmarkState.sourceChat?.name || '',
+        chatFileName: bookmarkState.sourceChat?.fileName || '',
+        groupId: bookmarkState.sourceChat?.groupId || '',
+        characterId: bookmarkState.sourceChat?.characterId || '',
+        characterName: bookmarkState.sourceChat?.characterName || '',
+        characterAvatar: bookmarkState.sourceChat?.characterAvatar || '',
+        msgId: bookmarkState.msgId,
+    };
+}
+
+function saveCurrentBookmark() {
+    if (!bookmarkState.fields) {
+        return;
+    }
+
+    const bookmark = saveBookmarkRecord(getBookmarkInput());
+    if (!bookmark) {
+        return;
+    }
+
+    toastr.success('북마크를 저장했어요.');
+    renderLibraryList();
+    closeBookmarkComposer();
+}
+
+function bindBookmarkControls($dialog) {
+    bookmarkState.fields = {
+        title: $dialog.find('#syq-bookmark-title'),
+    };
+
+    const fallbackTitle = getMessageTextByIndex(bookmarkState.messageIndex).slice(0, DOWNLOAD_NAME_MAX_LENGTH) || '북마크';
+    bookmarkState.fields.title.val(fallbackTitle);
+    $dialog.find('#syq-close-bookmark, #syq-cancel-bookmark').on('click', closeBookmarkComposer);
+    $dialog.find('#syq-save-bookmark').on('click', saveCurrentBookmark);
+}
+
+async function openBookmarkComposer(messageIndex) {
+    const context = getContextSafe();
+    const index = Number(messageIndex);
+    if (!context || !Array.isArray(context.chat) || !context.chat[index]) {
+        toastr.warning('북마크할 메시지를 찾을 수 없어요.');
+        return;
+    }
+
+    closeBookmarkComposer();
+    bookmarkState.messageIndex = index;
+    bookmarkState.msgId = await ensureMessageIndexMsgId(index);
+    bookmarkState.sourceChat = getCurrentChatInfo();
+
+    const modal = createModalFromHtml(await renderTemplate(context, 'bookmark'), 'syq-bookmark-modal');
+    bookmarkState.modal = modal;
+
+    const $dialog = $(modal).find('.syq-bookmark-popup').first();
+    bindBookmarkControls($dialog);
+    $(modal).find('.syq-modal-backdrop').on('click', closeBookmarkComposer);
+    $(document).off('keydown.syqbookmark').on('keydown.syqbookmark', (event) => {
+        if (event.key === 'Escape') {
+            closeBookmarkComposer();
+        }
+    });
+}
+
+function closeBookmarkComposer() {
+    if (bookmarkState.modal) {
+        bookmarkState.modal.remove();
+        bookmarkState.modal = null;
+    }
+
+    bookmarkState.fields = null;
+    bookmarkState.messageIndex = -1;
+    bookmarkState.msgId = '';
+    bookmarkState.sourceChat = null;
+    $(document).off('keydown.syqbookmark');
+}
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isCurrentChatRecord(record) {
+    if (findMessageIndexByMsgId(record?.msgId) >= 0) {
+        return true;
+    }
+
+    const currentChat = getCurrentChatInfo();
+    const chatId = getSavedRecordChatId(record);
+
+    return chatId !== CUSTOM_CHAT_ID && (
+        currentChat.id === chatId ||
+        Boolean(record?.chatFileName && currentChat.fileName === record.chatFileName)
+    );
+}
+
+function getCharacterIndexForRecord(record, context) {
+    const characters = Array.isArray(context?.characters) ? context.characters : [];
+    const characterId = Number(record?.characterId);
+    if (Number.isInteger(characterId) && characters[characterId]) {
+        return characterId;
+    }
+
+    const characterAvatar = String(record?.characterAvatar || '');
+    const characterName = String(record?.characterName || '');
+    const chatFileName = String(record?.chatFileName || record?.chatName || '');
+
+    return characters.findIndex(character => (
+        Boolean(characterAvatar && character?.avatar === characterAvatar) ||
+        Boolean(characterName && character?.name === characterName) ||
+        Boolean(chatFileName && character?.chat === chatFileName)
+    ));
+}
+
+async function openSavedRecordChat(record) {
+    if (isCurrentChatRecord(record)) {
+        return true;
+    }
+
+    const context = getContextSafe();
+    const chatFileName = String(record?.chatFileName || record?.chatName || '').trim();
+    if (!context || !chatFileName) {
+        return false;
+    }
+
+    try {
+        if (record?.groupId && context.openGroupChat) {
+            await context.openGroupChat(record.groupId, chatFileName);
+        } else if (context.openCharacterChat) {
+            const characterIndex = getCharacterIndexForRecord(record, context);
+            if (characterIndex >= 0 && Number(context.characterId) !== characterIndex) {
+                await context.selectCharacterById?.(characterIndex);
+                await sleep(CHAT_EVENT_DELAY_MS);
+            }
+
+            await context.openCharacterChat(chatFileName);
+        } else {
+            return false;
+        }
+
+        await sleep(CHAT_EVENT_DELAY_MS);
+        return true;
+    } catch (error) {
+        console.warn('Share Your Quotes: failed to open saved chat', error);
+        return false;
+    }
+}
+
+function findMessageIndexByMsgId(msgId) {
+    const context = getContextSafe();
+    if (!Array.isArray(context?.chat) || !msgId) {
+        return -1;
+    }
+
+    return context.chat.findIndex(message => String(message?.extra?.[MSG_ID_FIELD] || '') === String(msgId));
+}
+
+function getMessageElementByMsgId(msgId) {
+    const index = findMessageIndexByMsgId(msgId);
+    if (index < 0) {
+        return null;
+    }
+
+    return document.querySelector(`#chat .mes[mesid="${index}"]`);
+}
+
+async function waitForMessageElementByMsgId(msgId) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < MESSAGE_SCROLL_TIMEOUT_MS) {
+        const element = getMessageElementByMsgId(msgId);
+        if (element) {
+            return element;
+        }
+
+        await sleep(MESSAGE_SCROLL_POLL_MS);
+    }
+
+    return null;
+}
+
+async function jumpToSavedRecord(record) {
+    if (!record?.msgId) {
+        toastr.warning('이 항목에는 이동할 메시지 정보가 없어요.');
+        return;
+    }
+
+    const opened = await openSavedRecordChat(record);
+    if (!opened) {
+        toastr.warning('저장된 채팅방을 열 수 없어요.');
+        return;
+    }
+
+    await backfillChatMessageIds();
+    const element = await waitForMessageElementByMsgId(record.msgId);
+    if (!element) {
+        toastr.warning('저장된 메시지를 찾을 수 없어요.');
+        return;
+    }
+
+    element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    element.classList.add('syq-message-highlight');
+    setTimeout(() => element.classList.remove('syq-message-highlight'), 1800);
+}
+
+function injectMessageBookmarkButtons(root = document) {
+    $(root).find('#chat .mes').addBack('#chat .mes').each(function () {
+        const $message = $(this);
+        const $buttons = $message.find('.extraMesButtons').first();
+        if (!$buttons.length || $buttons.find('.syq-message-bookmark').length) {
+            return;
+        }
+
+        $buttons.append('<div title="북마크 저장" class="mes_button syq-message-bookmark fa-regular fa-bookmark"></div>');
+    });
+}
+
+function bindMessageBookmarkButtons() {
+    $(document)
+        .off('click.syqMessageBookmark', '.syq-message-bookmark')
+        .on('click.syqMessageBookmark', '.syq-message-bookmark', function (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            const messageIndex = Number($(this).closest('.mes').attr('mesid'));
+            void openBookmarkComposer(messageIndex);
+        });
+}
+
+function scheduleChatMetadataWork(messageIndex = null) {
+    setTimeout(() => {
+        const index = Number(messageIndex);
+        if (messageIndex === null || messageIndex === undefined || Number.isNaN(index)) {
+            void backfillChatMessageIds();
+        } else {
+            void ensureMessageIndexMsgId(index).then(() => injectMessageBookmarkButtons());
+        }
+    }, CHAT_EVENT_DELAY_MS);
+}
+
 function renderLibraryList() {
     if (!libraryState.items) {
         return;
     }
 
-    const allQuotes = getSavedQuotes();
-    renderLibraryChatFilter(allQuotes);
+    const isBookmarkTab = libraryState.activeTab === LIBRARY_TABS.bookmarks;
+    const allItems = isBookmarkTab ? getSavedBookmarks() : getSavedQuotes();
+    renderLibraryChatFilter(allItems);
 
-    const quotes = libraryState.filterChatId
-        ? allQuotes.filter(quote => getQuoteChatId(quote) === libraryState.filterChatId)
-        : allQuotes;
-    const totalPages = Math.max(1, Math.ceil(quotes.length / LIBRARY_PAGE_SIZE));
+    const items = libraryState.filterChatId
+        ? allItems.filter(item => getSavedRecordChatId(item) === libraryState.filterChatId)
+        : allItems;
+    const totalPages = Math.max(1, Math.ceil(items.length / LIBRARY_PAGE_SIZE));
     libraryState.currentPage = Math.min(Math.max(1, libraryState.currentPage), totalPages);
 
-    if (!allQuotes.length) {
+    if (!allItems.length) {
         libraryState.items.html(`
             <div class="syq-library-empty">
-                <strong>저장한 문장이 아직 없어요.</strong>
-                <span>공유 팝업에서 저장하기를 누르면 여기에 모아둘게요.</span>
+                <strong>${isBookmarkTab ? '저장한 북마크가 아직 없어요.' : '저장한 문장이 아직 없어요.'}</strong>
+                <span>${isBookmarkTab ? '메시지 버튼에서 북마크를 저장하면 여기에 모아둘게요.' : '공유 팝업에서 저장하기를 누르면 여기에 모아둘게요.'}</span>
             </div>
         `);
         libraryState.pagination?.empty();
         return;
     }
 
-    if (!quotes.length) {
+    if (!items.length) {
         libraryState.items.html(`
             <div class="syq-library-empty">
-                <strong>선택한 채팅에 저장된 문장이 없어요.</strong>
-                <span>다른 채팅을 선택해 문장 목록을 확인해보세요.</span>
+                <strong>선택한 채팅에 저장된 ${isBookmarkTab ? '북마크' : '문장'}이 없어요.</strong>
+                <span>다른 채팅을 선택해 목록을 확인해보세요.</span>
             </div>
         `);
         libraryState.pagination?.empty();
@@ -1204,23 +1683,48 @@ function renderLibraryList() {
     }
 
     const start = (libraryState.currentPage - 1) * LIBRARY_PAGE_SIZE;
-    const pageQuotes = quotes.slice(start, start + LIBRARY_PAGE_SIZE);
+    const pageItems = items.slice(start, start + LIBRARY_PAGE_SIZE);
 
-    libraryState.items.html(pageQuotes.map(quote => `
-        <article class="syq-library-item" data-id="${escapeHtml(quote.id)}">
+    libraryState.items.html(pageItems.map(item => {
+        const type = isBookmarkTab ? LIBRARY_TABS.bookmarks : LIBRARY_TABS.quotes;
+        const title = item.title || getSavedRecordChatLabel(item) || (isBookmarkTab ? '북마크' : '제목 없음');
+        const body = isBookmarkTab ? getSavedRecordChatLabel(item) : item.text;
+        const topMeta = isBookmarkTab
+            ? `<span class="syq-library-meta-title">${escapeHtml(title)}</span>`
+            : `
+                <span class="syq-library-meta-title">${escapeHtml(title)}</span>
+                <span class="syq-library-meta-date">${escapeHtml(formatSavedAt(item.savedAt))}</span>
+            `;
+        const bottomMeta = isBookmarkTab ? `
+            <div class="syq-library-meta">
+                ${libraryState.filterChatId ? '' : `<span class="syq-library-meta-title">${escapeHtml(getSavedRecordChatLabel(item))}</span>`}
+                <span class="syq-library-meta-date">${escapeHtml(formatSavedAt(item.savedAt))}</span>
+            </div>
+        ` : '';
+        const jumpButton = item.msgId ? `
+            <button type="button" class="syq-library-jump" data-type="${type}" data-id="${escapeHtml(item.id)}" aria-label="메시지로 이동"><i class="fa-regular fa-bookmark"></i></button>
+        ` : '';
+        const shareButton = isBookmarkTab ? '' : `
+            <button type="button" class="syq-library-share" data-type="${type}" data-id="${escapeHtml(item.id)}" aria-label="공유하기"><i class="fa-solid fa-image"></i></button>
+        `;
+
+        return `
+        <article class="syq-library-item" data-type="${type}" data-id="${escapeHtml(item.id)}">
             <div class="syq-library-actions">
                 <div class="syq-library-meta">
-                    <span class="syq-library-meta-title">${escapeHtml(quote.title || getQuoteChatLabel(quote) || '제목 없음')}</span>
-                    <span class="syq-library-meta-date">| ${escapeHtml(formatSavedAt(quote.savedAt))}</span>
+                    ${topMeta}
                 </div>
                 <div class="syq-library-action-buttons">
-                    <button type="button" class="syq-library-share" data-id="${escapeHtml(quote.id)}" aria-label="share"><i class="fa-solid fa-image"></i></button>
-                    <button type="button" class="syq-library-delete" data-id="${escapeHtml(quote.id)}" aria-label="delete"><i class="fa-solid fa-x"></i></button>
+                    ${jumpButton}
+                    ${shareButton}
+                    <button type="button" class="syq-library-delete" data-type="${type}" data-id="${escapeHtml(item.id)}" aria-label="삭제"><i class="fa-solid fa-x"></i></button>
                 </div>
             </div>
-            <p>${escapeHtml(quote.text)}</p>
+            <p>${escapeHtml(body)}</p>
+            ${bottomMeta}
         </article>
-    `).join(''));
+    `;
+    }).join(''));
 
     renderLibraryPagination(totalPages);
 }
@@ -1260,6 +1764,13 @@ function bindLibraryControls($dialog) {
     libraryState.filterSelect = $dialog.find('#syq-library-chat-filter');
     libraryState.importInput = $dialog.find('#syq-import-quotes-input');
     $dialog.find('#syq-close-library').on('click', closeLibrary);
+    $dialog.find('.syq-library-tab').on('click', function () {
+        libraryState.activeTab = String($(this).data('tab') || LIBRARY_TABS.quotes);
+        libraryState.currentPage = 1;
+        $dialog.find('.syq-library-tab').removeClass(ACTIVE_CLASS).attr('aria-selected', 'false');
+        $(this).addClass(ACTIVE_CLASS).attr('aria-selected', 'true');
+        renderLibraryList();
+    });
     $dialog.find('#syq-export-quotes').on('click', exportSavedQuotes);
     $dialog.find('#syq-import-quotes').on('click', () => {
         libraryState.importInput.val('');
@@ -1275,13 +1786,32 @@ function bindLibraryControls($dialog) {
     });
     $dialog.on('click', '.syq-library-delete', function () {
         const id = String($(this).data('id') || '');
-        if (!id || !confirm('이 문장을 삭제할까요?')) {
+        const type = String($(this).data('type') || libraryState.activeTab);
+        const itemName = type === LIBRARY_TABS.bookmarks ? '북마크' : '문장';
+        if (!id || !confirm(`이 ${itemName}을 삭제할까요?`)) {
             return;
         }
 
-        deleteQuoteRecord(id);
+        if (type === LIBRARY_TABS.bookmarks) {
+            deleteBookmarkRecord(id);
+        } else {
+            deleteQuoteRecord(id);
+        }
         renderLibraryList();
         toastr.success('삭제했어요.');
+    });
+    $dialog.on('click', '.syq-library-jump', function () {
+        const id = String($(this).data('id') || '');
+        const type = String($(this).data('type') || libraryState.activeTab);
+        const record = type === LIBRARY_TABS.bookmarks ? getBookmarkRecord(id) : getQuoteRecord(id);
+        if (!record) {
+            toastr.warning('항목을 찾을 수 없어요.');
+            renderLibraryList();
+            return;
+        }
+
+        closeLibrary();
+        void jumpToSavedRecord(record);
     });
     $dialog.on('click', '.syq-library-share', function () {
         const quote = getQuoteRecord(String($(this).data('id') || ''));
@@ -1295,6 +1825,16 @@ function bindLibraryControls($dialog) {
     });
     $dialog.on('click', '.syq-library-item', function (event) {
         if ($(event.target).closest('button').length) {
+            return;
+        }
+
+        const type = String($(this).data('type') || libraryState.activeTab);
+        if (type === LIBRARY_TABS.bookmarks) {
+            const bookmark = getBookmarkRecord(String($(this).data('id') || ''));
+            if (bookmark) {
+                closeLibrary();
+                void jumpToSavedRecord(bookmark);
+            }
             return;
         }
 
@@ -1320,6 +1860,7 @@ async function openLibrary(defaultFilterChatId = '', fallbackFilterChatId = '') 
 
     closeLibrary();
     libraryState.currentPage = 1;
+    libraryState.activeTab = LIBRARY_TABS.quotes;
     libraryState.filterChatId = defaultFilterChatId;
     libraryState.fallbackFilterChatId = fallbackFilterChatId;
     const modal = createModalFromHtml(await renderTemplate(context, 'library'));
@@ -1341,6 +1882,7 @@ async function openLibrary(defaultFilterChatId = '', fallbackFilterChatId = '') 
 
 function closeLibrary() {
     closeEditor();
+    closeBookmarkComposer();
     if (libraryState.modal) {
         libraryState.modal.remove();
         libraryState.modal = null;
@@ -1375,7 +1917,12 @@ function ensureSelectionMenu() {
         }
 
         popupState.selectedText = text;
-        await openComposer(text, null, getCurrentChatInfo());
+        const sourceChat = getCurrentChatInfo();
+        const msgId = await ensureMessageIndexMsgId(selectionState.messageIndex);
+        await openComposer(text, null, {
+            ...sourceChat,
+            msgId,
+        });
         globalThis.getSelection?.()?.removeAllRanges?.();
     });
 
@@ -1410,16 +1957,20 @@ function findSelectionRect(selection) {
     return rects[0] || range.getBoundingClientRect();
 }
 
-function isSelectionInsideMessage(selection) {
+function getSelectionMessageElement(selection) {
     if (!selection?.anchorNode) {
-        return false;
+        return null;
     }
 
     const node = selection.anchorNode.nodeType === Node.TEXT_NODE
         ? selection.anchorNode.parentElement
         : selection.anchorNode;
 
-    return !!node?.closest?.('.mes');
+    return node?.closest?.('.mes') || null;
+}
+
+function isSelectionInsideMessage(selection) {
+    return !!getSelectionMessageElement(selection);
 }
 
 function updateSelectionBubble() {
@@ -1433,6 +1984,7 @@ function updateSelectionBubble() {
     const text = selection?.toString?.().trim() || '';
     if (!text || !isSelectionInsideMessage(selection)) {
         selectionState.selectedText = '';
+        selectionState.messageIndex = -1;
         hideSelectionMenu(false);
         return;
     }
@@ -1445,6 +1997,7 @@ function updateSelectionBubble() {
 
     const menu = ensureSelectionMenu();
     selectionState.selectedText = text;
+    selectionState.messageIndex = Number(getSelectionMessageElement(selection)?.getAttribute('mesid'));
     menu.style.left = `${window.scrollX + rect.left + rect.width / 2}px`;
     menu.style.top = `${window.scrollY + rect.bottom + SELECTION_MENU_OFFSET_Y}px`;
     menu.classList.add('is-visible');
@@ -1559,17 +2112,34 @@ export async function onActivate() {
     }
 
     bindSelectionEvents();
+    bindMessageBookmarkButtons();
     scheduleWandMenuButton();
+    scheduleChatMetadataWork();
 
     const eventTypes = context.eventTypes || context.event_types;
     if (!eventTypes) {
         return;
     }
 
-    context.eventSource?.on?.(eventTypes.APP_INITIALIZED, () => {
+    const onEvent = (eventName, handler) => {
+        if (eventName) {
+            context.eventSource?.on?.(eventName, handler);
+        }
+    };
+
+    onEvent(eventTypes.APP_INITIALIZED, () => {
         scheduleWandMenuButton();
         if (!$('#extensions_settings2 .syq-settings').length) {
             void renderSettingsPanel();
         }
+        scheduleChatMetadataWork();
     });
+
+    onEvent(eventTypes.CHAT_CHANGED, () => scheduleChatMetadataWork());
+    onEvent(eventTypes.CHAT_LOADED, () => scheduleChatMetadataWork());
+    onEvent(eventTypes.MESSAGE_SENT, messageIndex => scheduleChatMetadataWork(messageIndex));
+    onEvent(eventTypes.MESSAGE_RECEIVED, messageIndex => scheduleChatMetadataWork(messageIndex));
+    onEvent(eventTypes.USER_MESSAGE_RENDERED, () => injectMessageBookmarkButtons());
+    onEvent(eventTypes.CHARACTER_MESSAGE_RENDERED, () => injectMessageBookmarkButtons());
+    onEvent(eventTypes.MORE_MESSAGES_LOADED, () => injectMessageBookmarkButtons());
 }
