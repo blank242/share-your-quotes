@@ -40,6 +40,8 @@ const CLIPBOARD_READ_DELAY_MS = 50;
 const CHAT_EVENT_DELAY_MS = 250;
 const MESSAGE_SCROLL_TIMEOUT_MS = 5000;
 const MESSAGE_SCROLL_POLL_MS = 120;
+const MESSAGE_LOAD_TIMEOUT_MS = 8000;
+const MESSAGE_LOAD_POLL_MS = 80;
 const SELECTION_UPDATE_DELAYS = Object.freeze({
     default: [60],
     mouseup: [30, 90],
@@ -539,6 +541,17 @@ function getSavedRecordChatId(record) {
     return String(record?.chatId || CUSTOM_CHAT_ID);
 }
 
+function getSavedRecordChatKey(record) {
+    const chatId = getSavedRecordChatId(record);
+    if (chatId === CUSTOM_CHAT_ID) {
+        return CUSTOM_CHAT_ID;
+    }
+
+    return String(record?.chatFileName || record?.chatName || chatId)
+        .replace(/\.jsonl$/i, '')
+        .replace(/^.*[\\/]/, '');
+}
+
 function getSavedRecordChatLabel(record) {
     const chatId = getSavedRecordChatId(record);
     if (chatId === CUSTOM_CHAT_ID) {
@@ -556,7 +569,7 @@ function getSavedRecordChatLabel(record) {
 }
 
 function getQuoteChatId(quote) {
-    return getSavedRecordChatId(quote);
+    return getSavedRecordChatKey(quote);
 }
 
 function getQuoteChatLabel(quote) {
@@ -566,7 +579,7 @@ function getQuoteChatLabel(quote) {
 function getLibraryChatOptions(records) {
     const options = new Map();
     for (const record of records) {
-        const chatId = getSavedRecordChatId(record);
+        const chatId = getSavedRecordChatKey(record);
         if (!options.has(chatId)) {
             options.set(chatId, getSavedRecordChatLabel(record));
         }
@@ -1496,9 +1509,11 @@ function isCurrentChatRecord(record) {
 
     const currentChat = getCurrentChatInfo();
     const chatId = getSavedRecordChatId(record);
+    const chatKey = getSavedRecordChatKey(record);
 
     return chatId !== CUSTOM_CHAT_ID && (
         currentChat.id === chatId ||
+        currentChat.fileName === chatKey ||
         Boolean(record?.chatFileName && currentChat.fileName === record.chatFileName)
     );
 }
@@ -1573,10 +1588,54 @@ function getMessageElementByMsgId(msgId) {
     return document.querySelector(`#chat .mes[mesid="${index}"]`);
 }
 
+function getFirstRenderedMessageIndex() {
+    const firstMessage = document.querySelector('#chat .mes[mesid]');
+    const index = Number(firstMessage?.getAttribute('mesid'));
+    return Number.isNaN(index) ? null : index;
+}
+
+async function waitForMoreMessagesRendered(previousFirstIndex) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < MESSAGE_LOAD_TIMEOUT_MS) {
+        const nextFirstIndex = getFirstRenderedMessageIndex();
+        if (nextFirstIndex !== null && nextFirstIndex < previousFirstIndex) {
+            return true;
+        }
+
+        await sleep(MESSAGE_LOAD_POLL_MS);
+    }
+
+    return false;
+}
+
+async function ensureMessageElementRendered(msgId) {
+    const targetIndex = findMessageIndexByMsgId(msgId);
+    if (targetIndex < 0) {
+        return null;
+    }
+
+    let element = document.querySelector(`#chat .mes[mesid="${targetIndex}"]`);
+    while (!element) {
+        const firstIndex = getFirstRenderedMessageIndex();
+        const showMoreButton = document.getElementById('show_more_messages');
+        if (!showMoreButton || firstIndex === null || firstIndex <= targetIndex) {
+            return null;
+        }
+
+        showMoreButton.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+        if (!await waitForMoreMessagesRendered(firstIndex)) {
+            return null;
+        }
+        element = document.querySelector(`#chat .mes[mesid="${targetIndex}"]`);
+    }
+
+    return element;
+}
+
 async function waitForMessageElementByMsgId(msgId) {
     const startedAt = Date.now();
     while (Date.now() - startedAt < MESSAGE_SCROLL_TIMEOUT_MS) {
-        const element = getMessageElementByMsgId(msgId);
+        const element = await ensureMessageElementRendered(msgId);
         if (element) {
             return element;
         }
@@ -1655,7 +1714,7 @@ function renderLibraryList() {
     renderLibraryChatFilter(allItems);
 
     const items = libraryState.filterChatId
-        ? allItems.filter(item => getSavedRecordChatId(item) === libraryState.filterChatId)
+        ? allItems.filter(item => getSavedRecordChatKey(item) === libraryState.filterChatId)
         : allItems;
     const totalPages = Math.max(1, Math.ceil(items.length / LIBRARY_PAGE_SIZE));
     libraryState.currentPage = Math.min(Math.max(1, libraryState.currentPage), totalPages);
