@@ -24,6 +24,7 @@ import {
     SAVED_QUOTES_FILE_NAME,
     SOURCE_SEPARATOR,
 } from './constants.js';
+import { showMoreMessages } from '/script.js';
 
 const EXPORT_VERSION = 1;
 const JSON_INDENT = 2;
@@ -434,6 +435,28 @@ function normalizeBookmarkRecord(input, fallback = {}) {
     };
 }
 
+function ensureCurrentChatIntegrityId(context) {
+    if (!context?.chatMetadata || typeof context.chatMetadata !== 'object') {
+        return '';
+    }
+
+    if (!context.chatMetadata.integrity) {
+        context.chatMetadata.integrity = createUuid();
+        try {
+            if (context.saveMetadata) {
+                void context.saveMetadata().catch(error => {
+                    console.warn('Share Your Quotes: failed to save chat integrity metadata', error);
+                });
+            }
+            context.saveMetadataDebounced?.();
+        } catch (error) {
+            console.warn('Share Your Quotes: failed to schedule chat integrity metadata save', error);
+        }
+    }
+
+    return String(context.chatMetadata.integrity || '');
+}
+
 function getCurrentChatInfo() {
     const context = getContextSafe();
     const currentGroup = context?.groups?.find?.(group => String(group.id) === String(context?.groupId));
@@ -444,17 +467,17 @@ function getCurrentChatInfo() {
         currentGroup?.chat_id ||
         currentCharacter?.chat
     );
-    const integrityId = context?.chatMetadata?.integrity;
+    const integrityId = ensureCurrentChatIntegrityId(context);
     const chatName = String(fileName || currentGroup?.name || currentCharacter?.name || CUSTOM_CHAT_ID)
         .replace(/\.jsonl$/i, '')
         .replace(/^.*[\\/]/, '');
 
-    if (!fileName && !integrityId) {
+    if (!integrityId) {
         return { id: CUSTOM_CHAT_ID, name: CUSTOM_CHAT_LABEL };
     }
 
     return {
-        id: String(integrityId || fileName),
+        id: integrityId,
         name: chatName,
         fileName: fileName ? String(fileName) : '',
         groupId: currentGroup?.id ? String(currentGroup.id) : '',
@@ -540,15 +563,19 @@ function getSavedRecordChatId(record) {
     return String(record?.chatId || CUSTOM_CHAT_ID);
 }
 
-function getSavedRecordChatKey(record) {
+function getSavedRecordChatFileName(record) {
+    return String(record?.chatFileName || record?.chatName || '')
+        .replace(/\.jsonl$/i, '')
+        .replace(/^.*[\\/]/, '');
+}
+
+function getSavedRecordFilterKey(record) {
     const chatId = getSavedRecordChatId(record);
     if (chatId === CUSTOM_CHAT_ID) {
         return CUSTOM_CHAT_ID;
     }
 
-    return String(record?.chatFileName || record?.chatName || chatId)
-        .replace(/\.jsonl$/i, '')
-        .replace(/^.*[\\/]/, '');
+    return getSavedRecordChatFileName(record) || chatId;
 }
 
 function getSavedRecordChatLabel(record) {
@@ -567,20 +594,12 @@ function getSavedRecordChatLabel(record) {
         .replace(/^.*[\\/]/, '');
 }
 
-function getQuoteChatId(quote) {
-    return getSavedRecordChatKey(quote);
-}
-
-function getQuoteChatLabel(quote) {
-    return getSavedRecordChatLabel(quote);
-}
-
 function getLibraryChatOptions(records) {
     const options = new Map();
     for (const record of records) {
-        const chatId = getSavedRecordChatKey(record);
-        if (!options.has(chatId)) {
-            options.set(chatId, getSavedRecordChatLabel(record));
+        const filterKey = getSavedRecordFilterKey(record);
+        if (!options.has(filterKey)) {
+            options.set(filterKey, getSavedRecordChatLabel(record));
         }
     }
 
@@ -1508,12 +1527,11 @@ function isCurrentChatRecord(record) {
 
     const currentChat = getCurrentChatInfo();
     const chatId = getSavedRecordChatId(record);
-    const chatKey = getSavedRecordChatKey(record);
+    const chatFileName = getSavedRecordChatFileName(record);
 
     return chatId !== CUSTOM_CHAT_ID && (
         currentChat.id === chatId ||
-        currentChat.fileName === chatKey ||
-        Boolean(record?.chatFileName && currentChat.fileName === record.chatFileName)
+        Boolean(chatFileName && currentChat.fileName === chatFileName)
     );
 }
 
@@ -1526,7 +1544,7 @@ function getCharacterIndexForRecord(record, context) {
 
     const characterAvatar = String(record?.characterAvatar || '');
     const characterName = String(record?.characterName || '');
-    const chatFileName = String(record?.chatFileName || record?.chatName || '');
+    const chatFileName = getSavedRecordChatFileName(record);
 
     return characters.findIndex(character => (
         Boolean(characterAvatar && character?.avatar === characterAvatar) ||
@@ -1541,7 +1559,7 @@ async function openSavedRecordChat(record) {
     }
 
     const context = getContextSafe();
-    const chatFileName = String(record?.chatFileName || record?.chatName || '').trim();
+    const chatFileName = getSavedRecordChatFileName(record).trim();
     if (!context || !chatFileName) {
         return false;
     }
@@ -1593,11 +1611,10 @@ function getFirstRenderedMessageIndex() {
     return Number.isNaN(index) ? null : index;
 }
 
-async function waitForMoreMessagesRendered(previousFirstIndex) {
+async function waitForMessageRenderedByIndex(targetIndex) {
     const startedAt = Date.now();
     while (Date.now() - startedAt < MESSAGE_LOAD_TIMEOUT_MS) {
-        const nextFirstIndex = getFirstRenderedMessageIndex();
-        if (nextFirstIndex !== null && nextFirstIndex < previousFirstIndex) {
+        if (document.querySelector(`#chat .mes[mesid="${targetIndex}"]`)) {
             return true;
         }
 
@@ -1621,8 +1638,8 @@ async function ensureMessageElementRendered(msgId) {
             return null;
         }
 
-        showMoreButton.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-        if (!await waitForMoreMessagesRendered(firstIndex)) {
+        await showMoreMessages(Math.max(firstIndex - targetIndex, 1));
+        if (!await waitForMessageRenderedByIndex(targetIndex)) {
             return null;
         }
         element = document.querySelector(`#chat .mes[mesid="${targetIndex}"]`);
@@ -1713,7 +1730,7 @@ function renderLibraryList() {
     renderLibraryChatFilter(allItems);
 
     const items = libraryState.filterChatId
-        ? allItems.filter(item => getSavedRecordChatKey(item) === libraryState.filterChatId)
+        ? allItems.filter(item => getSavedRecordFilterKey(item) === libraryState.filterChatId)
         : allItems;
     const totalPages = Math.max(1, Math.ceil(items.length / LIBRARY_PAGE_SIZE));
     libraryState.currentPage = Math.min(Math.max(1, libraryState.currentPage), totalPages);
