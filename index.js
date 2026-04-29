@@ -454,14 +454,13 @@ function getCurrentChatInfo() {
     }
 
     return {
-        id: String(fileName || integrityId),
+        id: String(integrityId || fileName),
         name: chatName,
         fileName: fileName ? String(fileName) : '',
         groupId: currentGroup?.id ? String(currentGroup.id) : '',
         characterId: currentCharacter ? String(context?.characterId ?? '') : '',
         characterName: currentCharacter?.name ? String(currentCharacter.name) : '',
         characterAvatar: currentCharacter?.avatar ? String(currentCharacter.avatar) : '',
-        integrityId: integrityId ? String(integrityId) : '',
     };
 }
 
