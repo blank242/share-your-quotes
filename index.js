@@ -1710,7 +1710,13 @@ function bindMessageBookmarkButtons() {
 }
 
 function scheduleChatMetadataWork(messageIndex = null) {
+    const scheduledChatId = getContextSafe()?.getCurrentChatId?.() || '';
     setTimeout(() => {
+        const currentChatId = getContextSafe()?.getCurrentChatId?.() || '';
+        if (scheduledChatId !== currentChatId) {
+            return;
+        }
+
         const index = Number(messageIndex);
         if (messageIndex === null || messageIndex === undefined || Number.isNaN(index)) {
             void backfillChatMessageIds();
